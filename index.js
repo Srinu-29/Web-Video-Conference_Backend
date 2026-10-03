@@ -70,21 +70,33 @@ io.on("connection", (socket) => {
   });
 
   // -----------------------------------------------------------------------
-  // STEP 1.5: TEXT CHAT
+  // STEP 1.5: TEXT CHAT & REACTIONS
   // -----------------------------------------------------------------------
   socket.on("send-chat", (roomId, text, userName) => {
+    if (!text || typeof text !== "string" || !text.trim()) return;
+
     const messageObj = {
+      id: `${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
       senderId: socket.id,
       senderName: userName || "Guest",
-      text: text,
+      text: text.trim(),
+      timestamp: Date.now(),
     };
     
-    // Save to server memory
+    // Save to server memory with bounded history (max 500 messages per room)
     if (!roomChatHistory[roomId]) roomChatHistory[roomId] = [];
     roomChatHistory[roomId].push(messageObj);
+    if (roomChatHistory[roomId].length > 500) {
+      roomChatHistory[roomId].shift();
+    }
 
     // Shout to everyone ELSE in the room
     socket.to(roomId).emit("receive-chat", messageObj);
+  });
+
+  // Real-time emoji reaction broadcast to all other participants
+  socket.on("send-reaction", (roomId, emoji) => {
+    socket.to(roomId).emit("receive-reaction", emoji);
   });
 
   // -----------------------------------------------------------------------
@@ -111,17 +123,33 @@ io.on("connection", (socket) => {
   });
 
   socket.on("change-name", (roomId, newName) => {
+    const safeName = newName && typeof newName === "string" && newName.trim() ? newName.trim() : "Guest";
     // Update the server's RAM memory
     if (roomUserNames[roomId]) {
-      roomUserNames[roomId][socket.id] = newName;
+      roomUserNames[roomId][socket.id] = safeName;
     }
     // Tell everyone else to update their video box name tags!
-    socket.to(roomId).emit("user-name-changed", socket.id, newName);
+    socket.to(roomId).emit("user-name-changed", socket.id, safeName);
   });
 
   socket.on("direct-state", ({ target, isMuted, isVideoOff }) => {
     io.to(target).emit("user-toggled-mute", socket.id, isMuted);
     io.to(target).emit("user-toggled-video", socket.id, isVideoOff);
+  });
+
+  // Explicit leave room (SPA client-side navigation)
+  socket.on("leave-room", (roomId) => {
+    console.log(`User ${socket.id} explicitly left room ${roomId}`);
+    socket.leave(roomId);
+    socket.to(roomId).emit("user-disconnected", socket.id);
+
+    if (roomUserNames[roomId]) {
+      delete roomUserNames[roomId][socket.id];
+      if (Object.keys(roomUserNames[roomId]).length === 0) {
+        delete roomUserNames[roomId];
+        delete roomChatHistory[roomId];
+      }
+    }
   });
 
   // -----------------------------------------------------------------------
@@ -133,6 +161,15 @@ io.on("connection", (socket) => {
     for (const room of socket.rooms) {
       if (room !== socket.id) {
         socket.to(room).emit("user-disconnected", socket.id);
+
+        // Clean up user from memory to prevent memory leak
+        if (roomUserNames[room]) {
+          delete roomUserNames[room][socket.id];
+          if (Object.keys(roomUserNames[room]).length === 0) {
+            delete roomUserNames[room];
+            delete roomChatHistory[room];
+          }
+        }
       }
     }
   });

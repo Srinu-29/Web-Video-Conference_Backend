@@ -33,6 +33,11 @@ app.get("/", (req, res) => {
 // === SOCKET.IO MATCHMAKING & SIGNALING LOGIC (THE WEBSOCKET LANE) ======== //
 // ========================================================================= //
 
+// A temporary dictionary to hold chat messages in RAM while the server is running
+const roomChatHistory = {};
+// A temporary dictionary to map Socket IDs to Usernames
+const roomUserNames = {};
+
 // The Front Door: Listens for any user who successfully upgrades to a WebSocket connection.
 io.on("connection", (socket) => {
   // 'socket' represents the individual Walkie-Talkie for the specific user who just connected.
@@ -41,10 +46,45 @@ io.on("connection", (socket) => {
   // -----------------------------------------------------------------------
   // STEP 1: JOINING A ROOM BUCKET
   // -----------------------------------------------------------------------
-  socket.on("join-room", (roomId, userId) => {
+  socket.on("join-room", (roomId, userId, userName) => {
     socket.join(roomId);
-    console.log(`User ${userId} was placed into room bucket ${roomId}`);
-    socket.to(roomId).emit("user-connected", userId);
+    console.log(`User ${userName} (${userId}) was placed into room bucket ${roomId}`);
+    
+    // 0. Save the user's name in the server RAM
+    if (!roomUserNames[roomId]) roomUserNames[roomId] = {};
+    roomUserNames[roomId][userId] = userName || "Guest";
+
+    // 1. Create a blank chat history for this room if it doesn't exist yet
+    if (!roomChatHistory[roomId]) {
+      roomChatHistory[roomId] = [];
+    }
+    
+    // 2. Hand the entire chat history DIRECTLY to the person who just joined
+    socket.emit("chat-history", roomChatHistory[roomId]);
+
+    // 3. Hand the dictionary of everyone's names to the person who just joined!
+    socket.emit("all-usernames", roomUserNames[roomId]);
+
+    // 4. Shout to everyone else that a new person arrived (and tell them the name!)
+    socket.to(roomId).emit("user-connected", userId, userName || "Guest");
+  });
+
+  // -----------------------------------------------------------------------
+  // STEP 1.5: TEXT CHAT
+  // -----------------------------------------------------------------------
+  socket.on("send-chat", (roomId, text, userName) => {
+    const messageObj = {
+      senderId: socket.id,
+      senderName: userName || "Guest",
+      text: text,
+    };
+    
+    // Save to server memory
+    if (!roomChatHistory[roomId]) roomChatHistory[roomId] = [];
+    roomChatHistory[roomId].push(messageObj);
+
+    // Shout to everyone ELSE in the room
+    socket.to(roomId).emit("receive-chat", messageObj);
   });
 
   // -----------------------------------------------------------------------
@@ -68,6 +108,15 @@ io.on("connection", (socket) => {
 
   socket.on("toggle-video", (roomId, isVideoOff) => {
     socket.to(roomId).emit("user-toggled-video", socket.id, isVideoOff);
+  });
+
+  socket.on("change-name", (roomId, newName) => {
+    // Update the server's RAM memory
+    if (roomUserNames[roomId]) {
+      roomUserNames[roomId][socket.id] = newName;
+    }
+    // Tell everyone else to update their video box name tags!
+    socket.to(roomId).emit("user-name-changed", socket.id, newName);
   });
 
   socket.on("direct-state", ({ target, isMuted, isVideoOff }) => {
